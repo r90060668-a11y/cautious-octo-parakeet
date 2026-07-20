@@ -1,8 +1,10 @@
 package com.kiro.arcade.data.repository
 
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
+import com.google.firebase.firestore.SetOptions
 import com.kiro.arcade.data.model.Chat
 import com.kiro.arcade.data.model.Message
 import com.kiro.arcade.data.model.Post
@@ -19,13 +21,19 @@ object FirebaseRepository {
 
     val currentUid get() = auth.currentUser?.uid
 
-    // ── Auth ──────────────────────────────────────────────────────────────────
-
     suspend fun register(email: String, password: String, username: String): Result<Unit> {
         return try {
             val result = auth.createUserWithEmailAndPassword(email, password).await()
             val uid = result.user!!.uid
-            val user = User(uid = uid, username = username)
+            val user = hashMapOf(
+                "uid" to uid,
+                "username" to username,
+                "bio" to "",
+                "avatarUrl" to "",
+                "followersCount" to 0,
+                "followingCount" to 0,
+                "fcmToken" to ""
+            )
             db.collection("users").document(uid).set(user).await()
             Result.success(Unit)
         } catch (e: Exception) {
@@ -44,28 +52,44 @@ object FirebaseRepository {
 
     fun logout() = auth.signOut()
 
-    // ── Users ─────────────────────────────────────────────────────────────────
-
     suspend fun getUser(uid: String): User? {
         return try {
-            db.collection("users").document(uid).get().await().toObject(User::class.java)
+            val doc = db.collection("users").document(uid).get().await()
+            if (!doc.exists()) return null
+            User(
+                uid = doc.getString("uid") ?: uid,
+                username = doc.getString("username") ?: "",
+                bio = doc.getString("bio") ?: "",
+                avatarUrl = doc.getString("avatarUrl") ?: "",
+                followersCount = (doc.getLong("followersCount") ?: 0L).toInt(),
+                followingCount = (doc.getLong("followingCount") ?: 0L).toInt(),
+                fcmToken = doc.getString("fcmToken") ?: ""
+            )
         } catch (e: Exception) { null }
     }
 
     suspend fun getCurrentUser(): User? = currentUid?.let { getUser(it) }
 
     suspend fun searchUsers(query: String): List<User> {
+        if (query.isBlank()) return emptyList()
         return try {
             db.collection("users")
                 .whereGreaterThanOrEqualTo("username", query)
                 .whereLessThanOrEqualTo("username", query + "\uf8ff")
                 .limit(20)
                 .get().await()
-                .toObjects(User::class.java)
+                .documents.mapNotNull { doc ->
+                    User(
+                        uid = doc.getString("uid") ?: "",
+                        username = doc.getString("username") ?: "",
+                        bio = doc.getString("bio") ?: "",
+                        avatarUrl = doc.getString("avatarUrl") ?: "",
+                        followersCount = (doc.getLong("followersCount") ?: 0L).toInt(),
+                        followingCount = (doc.getLong("followingCount") ?: 0L).toInt()
+                    )
+                }
         } catch (e: Exception) { emptyList() }
     }
-
-    // ── Follow ────────────────────────────────────────────────────────────────
 
     suspend fun isFollowing(targetUid: String): Boolean {
         val uid = currentUid ?: return false
@@ -76,54 +100,63 @@ object FirebaseRepository {
         } catch (e: Exception) { false }
     }
 
-    suspend fun followUser(targetUid: String) {
-        val uid = currentUid ?: return
-        val batch = db.batch()
+    suspend fun followUser(targetUid: String): Result<Unit> {
+        val uid = currentUid ?: return Result.failure(Exception("Не авторизован"))
+        return try {
+            db.collection("users").document(uid)
+                .collection("following").document(targetUid)
+                .set(mapOf("uid" to targetUid)).await()
 
-        // Add to following
-        batch.set(
-            db.collection("users").document(uid).collection("following").document(targetUid),
-            mapOf("uid" to targetUid)
-        )
-        // Add to followers
-        batch.set(
-            db.collection("users").document(targetUid).collection("followers").document(uid),
-            mapOf("uid" to uid)
-        )
-        // Update counts
-        batch.update(db.collection("users").document(uid), "followingCount",
-            com.google.firebase.firestore.FieldValue.increment(1))
-        batch.update(db.collection("users").document(targetUid), "followersCount",
-            com.google.firebase.firestore.FieldValue.increment(1))
-        batch.commit().await()
+            db.collection("users").document(targetUid)
+                .collection("followers").document(uid)
+                .set(mapOf("uid" to uid)).await()
 
-        // Check if mutual follow → create chat
-        val theyFollowMe = db.collection("users").document(targetUid)
-            .collection("following").document(uid).get().await().exists()
-        if (theyFollowMe) {
-            createChatIfNeeded(uid, targetUid)
+            db.collection("users").document(uid)
+                .set(mapOf("followingCount" to FieldValue.increment(1)), SetOptions.merge()).await()
+
+            db.collection("users").document(targetUid)
+                .set(mapOf("followersCount" to FieldValue.increment(1)), SetOptions.merge()).await()
+
+            val theyFollowMe = db.collection("users").document(targetUid)
+                .collection("following").document(uid).get().await().exists()
+            if (theyFollowMe) {
+                createChatIfNeeded(uid, targetUid)
+            }
+
+            try { sendFollowNotification(targetUid) } catch (e: Exception) { }
+
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
         }
-
-        // Send notification
-        sendFollowNotification(targetUid)
     }
 
-    suspend fun unfollowUser(targetUid: String) {
-        val uid = currentUid ?: return
-        val batch = db.batch()
-        batch.delete(db.collection("users").document(uid).collection("following").document(targetUid))
-        batch.delete(db.collection("users").document(targetUid).collection("followers").document(uid))
-        batch.update(db.collection("users").document(uid), "followingCount",
-            com.google.firebase.firestore.FieldValue.increment(-1))
-        batch.update(db.collection("users").document(targetUid), "followersCount",
-            com.google.firebase.firestore.FieldValue.increment(-1))
-        batch.commit().await()
+    suspend fun unfollowUser(targetUid: String): Result<Unit> {
+        val uid = currentUid ?: return Result.failure(Exception("Не авторизован"))
+        return try {
+            db.collection("users").document(uid)
+                .collection("following").document(targetUid).delete().await()
+
+            db.collection("users").document(targetUid)
+                .collection("followers").document(uid).delete().await()
+
+            db.collection("users").document(uid)
+                .set(mapOf("followingCount" to FieldValue.increment(-1)), SetOptions.merge()).await()
+
+            db.collection("users").document(targetUid)
+                .set(mapOf("followersCount" to FieldValue.increment(-1)), SetOptions.merge()).await()
+
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
     }
 
     private suspend fun createChatIfNeeded(uid1: String, uid2: String) {
         val chatId = if (uid1 < uid2) "${uid1}_${uid2}" else "${uid2}_${uid1}"
         val chatRef = db.collection("chats").document(chatId)
-        if (!chatRef.get().await().exists()) {
+        val exists = try { chatRef.get().await().exists() } catch (e: Exception) { false }
+        if (!exists) {
             chatRef.set(mapOf(
                 "participants" to listOf(uid1, uid2),
                 "lastMessage" to "",
@@ -143,63 +176,97 @@ object FirebaseRepository {
         )).await()
     }
 
-    // ── Posts ─────────────────────────────────────────────────────────────────
-
     fun getPostsFeed(): Flow<List<Post>> = callbackFlow {
         val listener = db.collection("posts")
             .orderBy("timestamp", Query.Direction.DESCENDING)
             .limit(50)
-            .addSnapshotListener { snap, _ ->
-                val posts = snap?.toObjects(Post::class.java) ?: emptyList()
+            .addSnapshotListener { snap, error ->
+                if (error != null) { trySend(emptyList()); return@addSnapshotListener }
+                val posts = snap?.documents?.mapNotNull { doc ->
+                    try {
+                        Post(
+                            id = doc.id,
+                            authorUid = doc.getString("authorUid") ?: "",
+                            authorUsername = doc.getString("authorUsername") ?: "",
+                            authorAvatarUrl = doc.getString("authorAvatarUrl") ?: "",
+                            imageUrl = doc.getString("imageUrl") ?: "",
+                            caption = doc.getString("caption") ?: "",
+                            likesCount = (doc.getLong("likesCount") ?: 0L).toInt(),
+                            timestamp = doc.getLong("timestamp") ?: 0L
+                        )
+                    } catch (e: Exception) { null }
+                } ?: emptyList()
                 trySend(posts)
             }
         awaitClose { listener.remove() }
     }
 
-    suspend fun createPost(caption: String, imageUrl: String) {
-        val uid = currentUid ?: return
-        val user = getUser(uid) ?: return
-        val post = Post(
-            id = db.collection("posts").document().id,
-            authorUid = uid,
-            authorUsername = user.username,
-            authorAvatarUrl = user.avatarUrl,
-            imageUrl = imageUrl,
-            caption = caption,
-            timestamp = System.currentTimeMillis()
-        )
-        db.collection("posts").document(post.id).set(post).await()
+    suspend fun createPost(caption: String, imageUrl: String): Result<Unit> {
+        val uid = currentUid ?: return Result.failure(Exception("Не авторизован"))
+        return try {
+            val user = getUser(uid)
+            val postRef = db.collection("posts").document()
+            val post = hashMapOf(
+                "id" to postRef.id,
+                "authorUid" to uid,
+                "authorUsername" to (user?.username ?: ""),
+                "authorAvatarUrl" to (user?.avatarUrl ?: ""),
+                "imageUrl" to imageUrl,
+                "caption" to caption,
+                "likesCount" to 0,
+                "timestamp" to System.currentTimeMillis()
+            )
+            postRef.set(post).await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
     }
 
     suspend fun searchPosts(query: String): List<Post> {
+        if (query.isBlank()) return emptyList()
         return try {
             db.collection("posts")
                 .whereGreaterThanOrEqualTo("caption", query)
                 .whereLessThanOrEqualTo("caption", query + "\uf8ff")
                 .limit(20)
                 .get().await()
-                .toObjects(Post::class.java)
+                .documents.mapNotNull { doc ->
+                    try {
+                        Post(
+                            id = doc.id,
+                            authorUid = doc.getString("authorUid") ?: "",
+                            authorUsername = doc.getString("authorUsername") ?: "",
+                            authorAvatarUrl = doc.getString("authorAvatarUrl") ?: "",
+                            imageUrl = doc.getString("imageUrl") ?: "",
+                            caption = doc.getString("caption") ?: "",
+                            likesCount = (doc.getLong("likesCount") ?: 0L).toInt(),
+                            timestamp = doc.getLong("timestamp") ?: 0L
+                        )
+                    } catch (e: Exception) { null }
+                }
         } catch (e: Exception) { emptyList() }
     }
-
-    // ── Chats ─────────────────────────────────────────────────────────────────
 
     fun getChats(): Flow<List<Chat>> = callbackFlow {
         val uid = currentUid ?: run { trySend(emptyList()); close(); return@callbackFlow }
         val listener = db.collection("chats")
             .whereArrayContains("participants", uid)
-            .orderBy("lastMessageTime", Query.Direction.DESCENDING)
-            .addSnapshotListener { snap, _ ->
+            .addSnapshotListener { snap, error ->
+                if (error != null) { trySend(emptyList()); return@addSnapshotListener }
                 val chats = snap?.documents?.mapNotNull { doc ->
-                    val participants = doc.get("participants") as? List<*> ?: return@mapNotNull null
-                    val otherUid = participants.firstOrNull { it != uid }?.toString() ?: return@mapNotNull null
-                    Chat(
-                        id = doc.id,
-                        participants = participants.map { it.toString() },
-                        lastMessage = doc.getString("lastMessage") ?: "",
-                        lastMessageTime = doc.getLong("lastMessageTime") ?: 0L,
-                        otherUserUid = otherUid
-                    )
+                    try {
+                        val participants = (doc.get("participants") as? List<*>)
+                            ?.map { it.toString() } ?: return@mapNotNull null
+                        val otherUid = participants.firstOrNull { it != uid } ?: return@mapNotNull null
+                        Chat(
+                            id = doc.id,
+                            participants = participants,
+                            lastMessage = doc.getString("lastMessage") ?: "",
+                            lastMessageTime = doc.getLong("lastMessageTime") ?: 0L,
+                            otherUserUid = otherUid
+                        )
+                    } catch (e: Exception) { null }
                 } ?: emptyList()
                 trySend(chats)
             }
@@ -210,25 +277,41 @@ object FirebaseRepository {
         val listener = db.collection("chats").document(chatId)
             .collection("messages")
             .orderBy("timestamp", Query.Direction.ASCENDING)
-            .addSnapshotListener { snap, _ ->
-                val messages = snap?.toObjects(Message::class.java) ?: emptyList()
+            .addSnapshotListener { snap, error ->
+                if (error != null) { trySend(emptyList()); return@addSnapshotListener }
+                val messages = snap?.documents?.mapNotNull { doc ->
+                    try {
+                        Message(
+                            id = doc.id,
+                            senderUid = doc.getString("senderUid") ?: "",
+                            text = doc.getString("text") ?: "",
+                            timestamp = doc.getLong("timestamp") ?: 0L
+                        )
+                    } catch (e: Exception) { null }
+                } ?: emptyList()
                 trySend(messages)
             }
         awaitClose { listener.remove() }
     }
 
-    suspend fun sendMessage(chatId: String, text: String) {
-        val uid = currentUid ?: return
-        val msg = Message(
-            id = db.collection("chats").document(chatId).collection("messages").document().id,
-            senderUid = uid,
-            text = text,
-            timestamp = System.currentTimeMillis()
-        )
-        db.collection("chats").document(chatId).collection("messages").document(msg.id).set(msg).await()
-        db.collection("chats").document(chatId).update(
-            "lastMessage", text,
-            "lastMessageTime", msg.timestamp
-        ).await()
+    suspend fun sendMessage(chatId: String, text: String): Result<Unit> {
+        val uid = currentUid ?: return Result.failure(Exception("Не авторизован"))
+        return try {
+            val msgRef = db.collection("chats").document(chatId).collection("messages").document()
+            val msg = hashMapOf(
+                "id" to msgRef.id,
+                "senderUid" to uid,
+                "text" to text,
+                "timestamp" to System.currentTimeMillis()
+            )
+            msgRef.set(msg).await()
+            db.collection("chats").document(chatId).set(
+                mapOf("lastMessage" to text, "lastMessageTime" to System.currentTimeMillis()),
+                SetOptions.merge()
+            ).await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
     }
 }
