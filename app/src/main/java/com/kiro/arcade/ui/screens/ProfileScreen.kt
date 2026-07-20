@@ -38,6 +38,7 @@ fun ProfileScreen(
     var user by remember { mutableStateOf<User?>(null) }
     var isFollowing by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
+    var errorMsg by remember { mutableStateOf("") }
 
     LaunchedEffect(targetUid) {
         user = FirebaseRepository.getUser(targetUid)
@@ -77,7 +78,8 @@ fun ProfileScreen(
                     FirebaseRepository.logout()
                     onLogout()
                 }) {
-                    Icon(Icons.Default.Logout, contentDescription = null, tint = Color.White.copy(alpha = 0.7f))
+                    Icon(Icons.Default.Logout, contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.7f))
                 }
             } else {
                 Spacer(Modifier.width(48.dp))
@@ -86,12 +88,12 @@ fun ProfileScreen(
 
         Spacer(Modifier.height(24.dp))
 
-        // Avatar
         Box(
             modifier = Modifier
                 .size(90.dp)
                 .clip(CircleShape)
-                .border(3.dp, Color(0xFF8B5CF6), CircleShape)
+                .border(3.dp, Color(0xFF8B5CF6), CircleShape),
+            contentAlignment = Alignment.Center
         ) {
             val avatarUrl = user?.avatarUrl ?: ""
             if (avatarUrl.isNotEmpty()) {
@@ -102,17 +104,12 @@ fun ProfileScreen(
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        user?.username?.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
-                        color = Color.White,
-                        fontSize = 36.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+                Text(
+                    user?.username?.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
+                    color = Color.White,
+                    fontSize = 36.sp,
+                    fontWeight = FontWeight.Bold
+                )
             }
         }
 
@@ -136,7 +133,6 @@ fun ProfileScreen(
 
         Spacer(Modifier.height(24.dp))
 
-        // Stats
         GlassCard(hazeState = hazeState, modifier = Modifier.fillMaxWidth()) {
             Row(
                 modifier = Modifier.padding(vertical = 20.dp).fillMaxWidth(),
@@ -151,21 +147,37 @@ fun ProfileScreen(
             }
         }
 
+        if (errorMsg.isNotEmpty()) {
+            Text(
+                errorMsg,
+                color = Color(0xFFFF6B6B),
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 12.dp)
+            )
+        }
+
         Spacer(Modifier.height(20.dp))
 
-        // Follow / unfollow button
         if (!isOwnProfile) {
             GlassButton(
                 onClick = {
                     scope.launch {
                         isLoading = true
-                        if (isFollowing) {
+                        errorMsg = ""
+                        val result = if (isFollowing)
                             FirebaseRepository.unfollowUser(targetUid)
-                        } else {
+                        else
                             FirebaseRepository.followUser(targetUid)
-                        }
-                        isFollowing = !isFollowing
-                        user = FirebaseRepository.getUser(targetUid)
+
+                        result.fold(
+                            onSuccess = {
+                                isFollowing = !isFollowing
+                                user = FirebaseRepository.getUser(targetUid)
+                            },
+                            onFailure = {
+                                errorMsg = it.message ?: "Ошибка"
+                            }
+                        )
                         isLoading = false
                     }
                 },
@@ -185,7 +197,6 @@ fun ProfileScreen(
             }
         }
 
-        // Hosts placeholder
         Spacer(Modifier.height(40.dp))
         Text(
             "Хосты скоро появятся",
