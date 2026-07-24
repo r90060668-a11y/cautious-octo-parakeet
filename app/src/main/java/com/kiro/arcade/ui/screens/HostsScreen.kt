@@ -1,6 +1,7 @@
 package com.kiro.arcade.ui.screens
 
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -14,7 +15,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -50,8 +50,6 @@ val MINECRAFT_VERSIONS = listOf(
 @Composable
 fun HostsScreen(hazeState: HazeState) {
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-
     var hosts by remember { mutableStateOf<List<HostInfo>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
     var showCreateDialog by remember { mutableStateOf(false) }
@@ -60,7 +58,8 @@ fun HostsScreen(hazeState: HazeState) {
     var successMsg by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
-        loadHosts { hosts = it; isLoading = false }
+        hosts = FirebaseRepository.getHosts()
+        isLoading = false
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -94,8 +93,7 @@ fun HostsScreen(hazeState: HazeState) {
             if (errorMsg.isNotEmpty()) {
                 item {
                     GlassCard(hazeState = hazeState, modifier = Modifier.fillMaxWidth()) {
-                        Text(errorMsg, color = Color(0xFFFF6B6B), fontSize = 13.sp,
-                            modifier = Modifier.padding(4.dp))
+                        Text(errorMsg, color = Color(0xFFFF6B6B), fontSize = 13.sp, modifier = Modifier.padding(4.dp))
                     }
                 }
             }
@@ -103,8 +101,7 @@ fun HostsScreen(hazeState: HazeState) {
             if (successMsg.isNotEmpty()) {
                 item {
                     GlassCard(hazeState = hazeState, modifier = Modifier.fillMaxWidth()) {
-                        Text(successMsg, color = Color(0xFF22C55E), fontSize = 13.sp,
-                            modifier = Modifier.padding(4.dp))
+                        Text(successMsg, color = Color(0xFF22C55E), fontSize = 13.sp, modifier = Modifier.padding(4.dp))
                     }
                 }
             }
@@ -126,7 +123,8 @@ fun HostsScreen(hazeState: HazeState) {
                             Spacer(Modifier.height(12.dp))
                             Text("Нет активных хостов", color = Color.White,
                                 fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                            Text("Создай первый Minecraft сервер!", color = Color.White.copy(alpha = 0.5f),
+                            Text("Создай первый Minecraft сервер!",
+                                color = Color.White.copy(alpha = 0.5f),
                                 fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
                         }
                     }
@@ -141,7 +139,7 @@ fun HostsScreen(hazeState: HazeState) {
                             scope.launch {
                                 ZeroTierRepository.deleteNetwork(host.networkId)
                                 FirebaseRepository.deleteHost(host.id)
-                                loadHosts { hosts = it }
+                                hosts = FirebaseRepository.getHosts()
                             }
                         },
                         isOwn = host.ownerUid == FirebaseRepository.currentUid
@@ -151,7 +149,6 @@ fun HostsScreen(hazeState: HazeState) {
         }
     }
 
-    // Create host dialog
     if (showCreateDialog) {
         CreateHostDialog(
             hazeState = hazeState,
@@ -166,7 +163,7 @@ fun HostsScreen(hazeState: HazeState) {
                         if (networkId != null) {
                             FirebaseRepository.createHost(name, version, networkId)
                             successMsg = "✅ Хост создан! Network ID: $networkId"
-                            loadHosts { hosts = it }
+                            hosts = FirebaseRepository.getHosts()
                         } else {
                             errorMsg = "Ошибка создания сети ZeroTier"
                         }
@@ -179,17 +176,14 @@ fun HostsScreen(hazeState: HazeState) {
         )
     }
 
-    // Join dialog
     showJoinDialog?.let { host ->
         JoinHostDialog(
             host = host,
             hazeState = hazeState,
             onDismiss = { showJoinDialog = null },
             onJoin = {
-                scope.launch {
-                    showJoinDialog = null
-                    successMsg = "Подключение к сети ${host.networkId}...\nОткрой ZeroTier и введи Network ID, затем зайди в Minecraft → Играть → Серверы → Добавить сервер"
-                }
+                showJoinDialog = null
+                successMsg = "Network ID: ${host.networkId}"
             }
         )
     }
@@ -214,39 +208,15 @@ fun HostCard(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             modifier = Modifier
-                                .size(8.dp)
-                                .clip(RoundedCornerShape(4.dp))
-                                .border(0.dp, Color.Transparent, RoundedCornerShape(4.dp))
-                        ) {
-                            val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-                            val alpha by infiniteTransition.animateFloat(
-                                initialValue = 1f, targetValue = 0.3f,
-                                animationSpec = infiniteRepeatable(tween(1000), RepeatMode.Reverse),
-                                label = "alpha"
-                            )
-                            Box(
-                                modifier = Modifier.fillMaxSize()
-                                    .then(Modifier.clip(RoundedCornerShape(4.dp)))
-                            )
-                        }
-                        Box(
-                            modifier = Modifier
                                 .size(10.dp)
                                 .clip(RoundedCornerShape(5.dp))
-                                .then(
-                                    if (host.online)
-                                        Modifier.border(0.dp, Color(0xFF22C55E), RoundedCornerShape(5.dp))
-                                    else
-                                        Modifier.border(0.dp, Color(0xFF6B7280), RoundedCornerShape(5.dp))
+                                .background(
+                                    if (host.online) Color(0xFF22C55E) else Color(0xFF6B7280)
                                 )
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text(
-                            host.name,
-                            color = Color.White,
-                            fontSize = 17.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Text(host.name, color = Color.White,
+                            fontSize = 17.sp, fontWeight = FontWeight.Bold)
                         if (isOwn) {
                             Spacer(Modifier.width(8.dp))
                             Box(
@@ -255,12 +225,13 @@ fun HostCard(
                                     .border(1.dp, Color(0xFF8B5CF6).copy(alpha = 0.5f), RoundedCornerShape(6.dp))
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
-                                Text("Мой", color = Color(0xFF8B5CF6), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                Text("Мой", color = Color(0xFF8B5CF6),
+                                    fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                             }
                         }
                     }
                     Spacer(Modifier.height(6.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         InfoChip("🎮 Bedrock ${host.version}")
                         InfoChip("👥 ${host.playerCount}/${host.maxPlayers}")
                         InfoChip("@${host.ownerUsername}")
@@ -324,7 +295,8 @@ fun CreateHostDialog(
         onDismissRequest = onDismiss,
         containerColor = Color(0xFF1A1428),
         title = {
-            Text("🎮 Создать хост", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            Text("🎮 Создать хост", color = Color.White,
+                fontWeight = FontWeight.Bold, fontSize = 18.sp)
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -336,7 +308,6 @@ fun CreateHostDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                // Version picker
                 Box(modifier = Modifier.fillMaxWidth()) {
                     GlassButton(
                         onClick = { expanded = true },
@@ -350,17 +321,17 @@ fun CreateHostDialog(
                     DropdownMenu(
                         expanded = expanded,
                         onDismissRequest = { expanded = false },
-                        modifier = Modifier
-                            .heightIn(max = 300.dp)
-                            .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(12.dp))
+                        modifier = Modifier.heightIn(max = 300.dp)
                     ) {
                         MINECRAFT_VERSIONS.forEach { version ->
                             DropdownMenuItem(
                                 text = { Text("Bedrock $version", color = Color.White) },
                                 onClick = { selectedVersion = version; expanded = false },
                                 modifier = Modifier.background(
-                                    if (version == selectedVersion) Color(0xFF8B5CF6).copy(alpha = 0.2f)
-                                    else Color(0xFF1A1428)
+                                    if (version == selectedVersion)
+                                        Color(0xFF8B5CF6).copy(alpha = 0.2f)
+                                    else
+                                        Color(0xFF1A1428)
                                 )
                             )
                         }
@@ -369,21 +340,24 @@ fun CreateHostDialog(
 
                 GlassCard(hazeState = hazeState, modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(4.dp)) {
-                        Text("ℹ️ Как это работает", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        Text("ℹ️ Как это работает", color = Color.White,
+                            fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                         Spacer(Modifier.height(8.dp))
-                        Text("1. Создастся виртуальная сеть ZeroTier", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
-                        Text("2. Игроки подключатся через ZeroTier", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
-                        Text("3. Реальный IP скрыт — все видят только виртуальный адрес", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
-                        Text("4. Запусти Minecraft и создай мир с LAN", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
+                        Text("1. Создастся виртуальная сеть ZeroTier",
+                            color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
+                        Text("2. Игроки подключаются через ZeroTier приложение",
+                            color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
+                        Text("3. Реальный IP скрыт от всех",
+                            color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
+                        Text("4. Запусти Minecraft → мир → открыть для LAN",
+                            color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
                     }
                 }
             }
         },
         confirmButton = {
             GlassButton(
-                onClick = {
-                    if (hostName.isNotBlank()) onCreate(hostName, selectedVersion)
-                },
+                onClick = { if (hostName.isNotBlank()) onCreate(hostName, selectedVersion) },
                 hazeState = hazeState,
                 modifier = Modifier.height(44.dp)
             ) {
@@ -424,11 +398,14 @@ fun JoinHostDialog(
 
                 GlassCard(hazeState = hazeState, modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(4.dp)) {
-                        Text("📋 Инструкция", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        Text("📋 Инструкция", color = Color.White,
+                            fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                         Spacer(Modifier.height(8.dp))
-                        Text("1. Установи приложение ZeroTier из Play Market", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+                        Text("1. Установи ZeroTier из Play Market",
+                            color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
                         Spacer(Modifier.height(4.dp))
-                        Text("2. Введи Network ID в ZeroTier:", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+                        Text("2. Введи Network ID:",
+                            color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -440,18 +417,16 @@ fun JoinHostDialog(
                                 fontWeight = FontWeight.Bold, fontSize = 15.sp)
                         }
                         Spacer(Modifier.height(4.dp))
-                        Text("3. Открой Minecraft → Играть → Друзья", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
-                        Text("4. Сервер хоста появится автоматически!", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+                        Text("3. Открой Minecraft → Играть → Друзья",
+                            color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+                        Text("4. Сервер появится автоматически!",
+                            color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
                     }
                 }
             }
         },
         confirmButton = {
-            GlassButton(
-                onClick = onJoin,
-                hazeState = hazeState,
-                modifier = Modifier.height(44.dp)
-            ) {
+            GlassButton(onClick = onJoin, hazeState = hazeState, modifier = Modifier.height(44.dp)) {
                 Text("Понятно!", color = Color.White, fontWeight = FontWeight.SemiBold)
             }
         },
@@ -465,13 +440,11 @@ fun JoinHostDialog(
 
 @Composable
 fun InfoRow(label: String, value: String) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
         Text(label, color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp)
         Text(value, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
     }
-}
-
-suspend fun loadHosts(onResult: (List<HostInfo>) -> Unit) {
-    val hosts = FirebaseRepository.getHosts()
-    onResult(hosts)
 }
